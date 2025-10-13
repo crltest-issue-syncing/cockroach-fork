@@ -10,10 +10,14 @@ on:
       - "master-trunk"
       - "staging"
       - "trying"
+      - "trunk-merge/**"  # Support push-triggered mode for Trunk Merge Queue
   workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
+
+env:
+  FLAKY_FAILURE_RATE: 10  # 10% chance of failure for non-stable branches
 jobs:
   acceptance:
     runs-on: ubuntu-latest
@@ -24,6 +28,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
       - name: compute metadata
         run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "acceptance tests"
       - name: dummy acceptance tests
         run: |
           echo "🧪 Running acceptance tests..."
@@ -38,6 +47,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
       - name: compute metadata
         run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "generated code check"
       - name: dummy check generated code
         run: |
           echo "🔍 Checking generated code..."
@@ -52,6 +66,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
       - name: compute metadata
         run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "docker tests"
       - name: dummy docker tests
         run: |
           echo "🐳 Running docker tests..."
@@ -154,6 +173,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
       - name: compute metadata
         run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "unit tests"
       - name: dummy unit tests
         run: |
           echo "🧪 Running unit tests..."
