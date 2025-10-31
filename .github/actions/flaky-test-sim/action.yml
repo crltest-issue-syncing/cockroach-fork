@@ -22,7 +22,14 @@ runs:
       run: |
         echo "🎲 Running flaky test simulation for: ${{ inputs.test-name }}"
         echo "Branch: ${{ github.head_ref }}"
+        echo "Base branch: ${{ github.base_ref }}"
         echo "Failure rate: ${{ inputs.failure-rate }}%"
+        
+        # Check if base branch is master-aviator (no flaky failures for aviator)
+        if [[ "${{ github.base_ref }}" == "master-aviator" ]]; then
+          echo "✅ Base branch is 'master-aviator' - no flaky failures for aviator merge queue"
+          exit 0
+        fi
         
         # Check if branch has stable prefix
         if [[ "${{ github.head_ref }}" == ${{ inputs.stable-prefix }}* ]]; then
