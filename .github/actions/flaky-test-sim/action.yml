@@ -1,0 +1,52 @@
+name: 'Flaky Test Simulation'
+description: 'Simulates flaky test behavior for merge queue testing'
+inputs:
+  failure-rate:
+    description: 'Percentage chance of failure (0-100)'
+    required: false
+    default: '10'
+  stable-prefix:
+    description: 'Branch prefix that ensures success'
+    required: false
+    default: 'stable-'
+  test-name:
+    description: 'Name of the test being simulated'
+    required: false
+    default: 'generic test'
+    
+runs:
+  using: 'composite'
+  steps:
+    - name: Flaky Test Simulation
+      shell: bash
+      run: |
+        echo "🎲 Running flaky test simulation for: ${{ inputs.test-name }}"
+        echo "Branch: ${{ github.head_ref }}"
+        echo "Base branch: ${{ github.base_ref }}"
+        echo "Failure rate: ${{ inputs.failure-rate }}%"
+        
+        # Check if base branch is master-gmq (no flaky failures for gmq)
+        if [[ "${{ github.base_ref }}" == "master-gmq" ]]; then
+          echo "✅ Base branch is 'master-gmq' - no flaky failures for gmq merge queue"
+          exit 0
+        fi
+        
+        # Check if branch has stable prefix
+        if [[ "${{ github.head_ref }}" == ${{ inputs.stable-prefix }}* ]]; then
+          echo "✅ Branch has stable prefix '${{ inputs.stable-prefix }}' - guaranteed success"
+          exit 0
+        fi
+        
+        # Generate random number between 1-100
+        RANDOM_NUM=$((1 + RANDOM % 100))
+        echo "Random number: $RANDOM_NUM"
+        
+        # Check if we should fail
+        if [ $RANDOM_NUM -le ${{ inputs.failure-rate }} ]; then
+          echo "💥 Simulating flaky test failure ($RANDOM_NUM <= ${{ inputs.failure-rate }})"
+          echo "This represents the ${{ inputs.failure-rate }}% flaky failure rate"
+          exit 1
+        else
+          echo "✅ Test passed ($RANDOM_NUM > ${{ inputs.failure-rate }})"
+          exit 0
+        fi

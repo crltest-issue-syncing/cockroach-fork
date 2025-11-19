@@ -1,0 +1,373 @@
+name: GitHub Actions Essential CI (Master-gmq)
+on:
+  merge_group:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - "master-gmq"
+      - "!master-aviator"
+      - "!master-trunk"
+  push:
+    branches:
+      - "master-gmq"
+      - "staging"
+      - "trying"
+      - "gmq-merge/**"  # Support push-triggered mode for gmq Merge Queue
+      - "!master-aviator"
+      - "!master-trunk"
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  FLAKY_FAILURE_RATE: 10  # 10% chance of failure for non-stable branches
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "acceptance tests"
+      - name: dummy acceptance tests
+        run: |
+          echo "🧪 Running acceptance tests..."
+          sleep 3
+          echo "✅ Acceptance tests passed!"
+  check_generated_code:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "generated code check"
+      - name: dummy check generated code
+        run: |
+          echo "🔍 Checking generated code..."
+          sleep 3
+          echo "✅ Generated code check passed!"
+  docker_image_amd64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "docker tests"
+      - name: dummy docker tests
+        run: |
+          echo "🐳 Running docker tests..."
+          sleep 3
+          echo "✅ Docker tests passed!"
+  examples_orms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cockroach
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy ORM tests
+        run: |
+          echo "🔗 Running ORM examples tests..."
+          sleep 3
+          echo "✅ ORM tests passed!"
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          submodules: true
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy lint tests
+        run: |
+          echo "🧹 Running lint tests..."
+          sleep 3
+          echo "✅ Lint tests passed!"
+  local_roachtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          submodules: true
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy local roachtests
+        run: |
+          echo "🚀 Running local roachtests..."
+          sleep 3
+          echo "✅ Local roachtests passed!"
+  local_roachtest_fips:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          submodules: true
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy FIPS roachtests
+        run: |
+          echo "🔒 Running FIPS roachtests..."
+          sleep 3
+          echo "✅ FIPS roachtests passed!"
+  linux_amd64_build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy build
+        run: |
+          echo "🔨 Building Linux AMD64..."
+          sleep 3
+          echo "✅ Linux AMD64 build passed!"
+  linux_amd64_fips_build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy FIPS build
+        run: |
+          echo "🔨 Building Linux AMD64 FIPS..."
+          sleep 3
+          echo "✅ Linux AMD64 FIPS build passed!"
+  unit_tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "unit tests"
+      - name: dummy unit tests
+        run: |
+          echo "🧪 Running unit tests..."
+          sleep 3
+          echo "✅ Unit tests passed!"name: GitHub Actions Essential CI (Master-gmq)
+on:
+  merge_group:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - "master-gmq"
+  push:
+    branches:
+      - "master-gmq"
+      - "staging"
+      - "trying"
+      - "gmq-merge/**"  # Support push-triggered mode for gmq Merge Queue
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  FLAKY_FAILURE_RATE: 10  # 10% chance of failure for non-stable branches
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "acceptance tests"
+      - name: dummy acceptance tests
+        run: |
+          echo "🧪 Running acceptance tests..."
+          sleep 3
+          echo "✅ Acceptance tests passed!"
+  check_generated_code:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "generated code check"
+      - name: dummy check generated code
+        run: |
+          echo "🔍 Checking generated code..."
+          sleep 3
+          echo "✅ Generated code check passed!"
+  docker_image_amd64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "docker tests"
+      - name: dummy docker tests
+        run: |
+          echo "🐳 Running docker tests..."
+          sleep 3
+          echo "✅ Docker tests passed!"
+  examples_orms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cockroach
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy ORM tests
+        run: |
+          echo "🔗 Running ORM examples tests..."
+          sleep 3
+          echo "✅ ORM tests passed!"
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          submodules: true
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy lint tests
+        run: |
+          echo "🧹 Running lint tests..."
+          sleep 3
+          echo "✅ Lint tests passed!"
+  local_roachtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          submodules: true
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy local roachtests
+        run: |
+          echo "🚀 Running local roachtests..."
+          sleep 3
+          echo "✅ Local roachtests passed!"
+  local_roachtest_fips:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          submodules: true
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy FIPS roachtests
+        run: |
+          echo "🔒 Running FIPS roachtests..."
+          sleep 3
+          echo "✅ FIPS roachtests passed!"
+  linux_amd64_build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy build
+        run: |
+          echo "🔨 Building Linux AMD64..."
+          sleep 3
+          echo "✅ Linux AMD64 build passed!"
+  linux_amd64_fips_build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: dummy FIPS build
+        run: |
+          echo "🔨 Building Linux AMD64 FIPS..."
+          sleep 3
+          echo "✅ Linux AMD64 FIPS build passed!"
+  unit_tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+      - name: compute metadata
+        run: echo GITHUB_ACTIONS_BRANCH=${{ github.event.pull_request.number || github.ref_name}} >> "$GITHUB_ENV"
+      - name: flaky test simulation
+        uses: ./.github/actions/flaky-test-sim
+        with:
+          failure-rate: ${{ env.FLAKY_FAILURE_RATE }}
+          test-name: "unit tests"
+      - name: dummy unit tests
+        run: |
+          echo "🧪 Running unit tests..."
+          sleep 3
+          echo "✅ Unit tests passed!"
