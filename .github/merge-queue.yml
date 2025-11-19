@@ -1,0 +1,52 @@
+# GitHub Merge Queue Configuration for master-gmq branch
+# This file configures merge queue behavior for the master-gmq branch
+
+merge_queue:
+  # Required status checks that must pass before merging
+  required_status_checks:
+    - acceptance
+    - check_generated_code
+    - docker_image_amd64
+    - examples_orms
+    - lint
+    - local_roachtest
+    - local_roachtest_fips
+    - linux_amd64_build
+    - linux_amd64_fips_build
+    - unit_tests
+
+  # Merge method to use
+  merge_method: merge
+
+  # Maximum number of PRs that can be in the queue at once
+  max_entries_to_build: 10
+
+  # Maximum number of PRs that can be built concurrently
+  max_entries_to_merge: 5
+
+  # Minimum number of entries to batch together (1 means no batching)
+  min_entries_for_update: 1
+
+  # Allow draft PRs in merge queue
+  allow_draft_prs: false
+
+  # Automatically add PRs that meet criteria
+  auto_merge_enabled: false
+
+  # Branch protection settings for the queue
+  branch_protection:
+    # Require branches to be up to date before merging
+    strict: false
+    
+    # Required status checks
+    contexts:
+      - acceptance
+      - check_generated_code
+      - docker_image_amd64
+      - examples_orms
+      - lint
+      - local_roachtest
+      - local_roachtest_fips
+      - linux_amd64_build
+      - linux_amd64_fips_build
+      - unit_tests
