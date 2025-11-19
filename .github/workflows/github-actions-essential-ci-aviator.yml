@@ -5,12 +5,16 @@ on:
     types: [opened, reopened, synchronize]
     branches:
       - "master-aviator"
+      - "!master-trunk"
+      - "!master-gmq"
   push:
     branches:
       - "master-aviator"
       - "staging"
       - "trying"
       - "aviator-merge/**"  # Support push-triggered mode for aviator Merge Queue
+      - "!master-trunk"
+      - "!master-gmq"
   workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
