@@ -299,7 +299,6 @@ jobs:
                     title
                     baseRefName
                     mergeable
-                    mergeableState
                     mergeStateStatus
                   }
                 }
@@ -307,16 +306,14 @@ jobs:
           
           PR_ID=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.id')
           MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
-          MERGEABLE_STATE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeableState')
           MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
           
           echo "PR ID: $PR_ID"
           echo "Mergeable: $MERGEABLE"
-          echo "Mergeable State: $MERGEABLE_STATE" 
           echo "Merge State Status: $MERGE_STATE_STATUS"
           
           # Wait for mergeability check if still unknown
-          if [[ "$MERGEABLE" == "null" ]] || [[ "$MERGEABLE_STATE" == "UNKNOWN" ]]; then
+          if [[ "$MERGEABLE" == "null" ]] || [[ "$MERGEABLE" == "UNKNOWN" ]]; then
             echo "⏳ Mergeability check still in progress, waiting..."
             sleep 10
             
@@ -331,21 +328,19 @@ jobs:
                     pullRequest(number: $number) {
                       id
                       mergeable
-                      mergeableState
                       mergeStateStatus
                     }
                   }
                 }')
                 
             MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
-            MERGEABLE_STATE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeableState')
             MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
             
-            echo "After wait - Mergeable: $MERGEABLE, State: $MERGEABLE_STATE, Status: $MERGE_STATE_STATUS"
+            echo "After wait - Mergeable: $MERGEABLE, Status: $MERGE_STATE_STATUS"
           fi
           
           # Check if PR is ready for merge queue
-          if [[ "$MERGEABLE" == "false" ]] || [[ "$MERGEABLE_STATE" == "CONFLICTING" ]]; then
+          if [[ "$MERGEABLE" == "false" ]]; then
             echo "❌ PR has merge conflicts and cannot be added to merge queue"
             gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
               -f body="❌ Cannot add to merge queue: PR has merge conflicts. Please resolve conflicts first."
