@@ -25,9 +25,13 @@ runs:
         echo "Base branch: ${{ github.base_ref }}"
         echo "Failure rate: ${{ inputs.failure-rate }}%"
         
-        # Check if base branch is master-gmq (no flaky failures for gmq)
-        if [[ "${{ github.base_ref }}" == "master-gmq" ]]; then
-          echo "✅ Base branch is 'master-gmq' - no flaky failures for gmq merge queue"
+        # Check if this is a merge queue branch (enable flaky tests for merge queue)
+        if [[ "${{ github.head_ref }}" == gh-readonly-queue/* ]]; then
+          echo "🎲 This is a merge queue branch - flaky tests ENABLED for merge queue testing"
+          echo "Merge queue branch: ${{ github.head_ref }}"
+          # Continue with flaky test simulation
+        elif [[ "${{ github.base_ref }}" == "master-gmq" ]]; then
+          echo "✅ Regular PR to master-gmq - no flaky failures for initial CI"
           exit 0
         fi
         
