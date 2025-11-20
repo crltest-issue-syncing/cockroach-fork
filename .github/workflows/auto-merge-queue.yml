@@ -1,0 +1,117 @@
+name: Auto Merge Queue on CI Success
+on:
+  check_suite:
+    types: [completed]
+
+jobs:
+  auto_enqueue:
+    if: |
+      github.event.check_suite.conclusion == 'success' &&
+      github.event.check_suite.pull_requests[0] != null &&
+      github.event.check_suite.pull_requests[0].base.ref == 'master-gmq'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if PR has auto-merge label
+        id: check_label
+        run: |
+          PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
+          HAS_LABEL=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.labels[] | select(.name == "auto-merge") | .name')
+          echo "has_auto_merge_label=$([[ -n "$HAS_LABEL" ]] && echo "true" || echo "false")" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
+      - name: Verify All Required Checks Passed
+        id: check_status
+        run: |
+          PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
+          
+          # Get PR details and check status
+          CHECKS_STATUS=$(gh api graphql \
+            -f owner="${{ github.repository_owner }}" \
+            -f repo="${{ github.event.repository.name }}" \
+            -F number="$PR_NUMBER" \
+            -f query='
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    commits(last: 1) {
+                      nodes {
+                        commit {
+                          statusCheckRollup {
+                            state
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }' --jq '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.state')
+          
+          echo "checks_status=$CHECKS_STATUS" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
+      - name: Add to Merge Queue
+        if: |
+          steps.check_label.outputs.has_auto_merge_label == 'true' &&
+          steps.check_status.outputs.checks_status == 'SUCCESS'
+        run: |
+          PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
+          
+          echo "🚀 Adding PR #$PR_NUMBER to merge queue with PAT..."
+          
+          # Get PR ID using GraphQL
+          PR_ID=$(gh api graphql \
+            -f owner="${{ github.repository_owner }}" \
+            -f repo="${{ github.event.repository.name }}" \
+            -F number="$PR_NUMBER" \
+            -f query='
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    id
+                    title
+                    baseRefName
+                  }
+                }
+              }' --jq '.data.repository.pullRequest.id')
+
+          echo "📋 PR ID: $PR_ID"
+
+          # Enqueue PR using GraphQL mutation
+          RESULT=$(gh api graphql \
+            -f pr_id="$PR_ID" \
+            -f query='
+              mutation($pr_id: ID!) {
+                enqueuePullRequest(input: {
+                  pullRequestId: $pr_id
+                }) {
+                  clientMutationId
+                  mergeQueueEntry {
+                    id
+                    position
+                  }
+                }
+              }')
+
+          QUEUE_POSITION=$(echo "$RESULT" | jq -r '.data.enqueuePullRequest.mergeQueueEntry.position // "unknown"')
+          echo "✅ Successfully added to merge queue at position: $QUEUE_POSITION"
+
+          # Comment on PR with success
+          gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+            -f body="🤖 Automatically added to merge queue at position **$QUEUE_POSITION** after CI success ✅"
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
+      - name: Handle Enqueue Failure
+        if: failure()
+        run: |
+          PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
+          echo "❌ Failed to add PR #$PR_NUMBER to merge queue"
+          
+          # Comment on PR with failure
+          gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+            -f body="❌ Failed to add PR to merge queue automatically. Please check the action logs or add manually using \`/merge-queue\` command."
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
