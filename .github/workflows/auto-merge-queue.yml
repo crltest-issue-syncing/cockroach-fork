@@ -119,9 +119,9 @@ jobs:
           PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
           echo "⏳ Waiting for CI completion on PR #$PR_NUMBER (timeout: 10 minutes)"
           
-          # Function to check CI status
+          # Function to check CI status (excluding auto-merge workflow)
           check_ci_status() {
-            gh api graphql \
+            local response=$(gh api graphql \
               -f owner="${{ github.repository_owner }}" \
               -f repo="${{ github.event.repository.name }}" \
               -F number="$PR_NUMBER" \
@@ -132,15 +132,48 @@ jobs:
                       commits(last: 1) {
                         nodes {
                           commit {
-                            statusCheckRollup {
-                              state
+                            checkSuites(first: 20) {
+                              nodes {
+                                workflowRun {
+                                  workflow {
+                                    name
+                                  }
+                                }
+                                conclusion
+                                status
+                                checkRuns(first: 50) {
+                                  nodes {
+                                    name
+                                    conclusion
+                                    status
+                                  }
+                                }
+                              }
                             }
                           }
                         }
                       }
                     }
                   }
-                }' --jq '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.state'
+                }')
+            
+            # Debug: Show all workflows
+            echo "DEBUG: All workflows found:"
+            echo "$response" | jq -r '.data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes[] | select(.workflowRun.workflow.name != null) | .workflowRun.workflow.name'
+            
+            # Filter out auto-merge workflow and calculate status
+            local status=$(echo "$response" | jq -r '
+              .data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes
+              | map(select(.workflowRun.workflow.name != "Auto Merge Queue on CI Success"))
+              | map(.checkRuns.nodes[])
+              | map(select(.conclusion != null))
+              | if length == 0 then "PENDING"
+                elif all(.conclusion == "success") then "SUCCESS"
+                elif any(.conclusion == "failure") then "FAILURE"
+                else "PENDING" end')
+                
+            echo "DEBUG: Filtered status (excluding auto-merge): $status"
+            echo "$status"
           }
           
           # Initial status check
