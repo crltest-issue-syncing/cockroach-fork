@@ -2,28 +2,122 @@ name: Auto Merge Queue on CI Success
 on:
   check_suite:
     types: [completed]
+  pull_request:
+    types: [labeled]
+    branches: [master-gmq]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to test workflow'
+        required: true
+        type: string
 
 jobs:
   auto_enqueue:
-    if: |
-      github.event.check_suite.conclusion == 'success' &&
-      github.event.check_suite.pull_requests[0] != null &&
-      github.event.check_suite.pull_requests[0].base.ref == 'master-gmq'
     runs-on: ubuntu-latest
     steps:
+      - name: Debug Event Information
+        run: |
+          echo "Event name: ${{ github.event_name }}"
+          echo "Event action: ${{ github.event.action || 'N/A' }}"
+          
+          if [[ "${{ github.event_name }}" == "check_suite" ]]; then
+            echo "Check suite conclusion: ${{ github.event.check_suite.conclusion }}"
+            echo "Check suite status: ${{ github.event.check_suite.status }}"
+            echo "Check suite head branch: ${{ github.event.check_suite.head_branch }}"
+            echo "Pull requests count: ${{ github.event.check_suite.pull_requests[0] && '1+' || '0' }}"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "PR number: ${{ github.event.pull_request.number }}"
+            echo "PR base ref: ${{ github.event.pull_request.base.ref }}"
+            echo "PR state: ${{ github.event.pull_request.state }}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "Manual trigger for PR: ${{ github.event.inputs.pr_number }}"
+          fi
+
+      - name: Determine PR Number and Validate
+        id: get_pr
+        run: |
+          if [[ "${{ github.event_name }}" == "check_suite" ]]; then
+            # For check_suite events
+            if [[ "${{ github.event.check_suite.conclusion }}" != "success" ]]; then
+              echo "Skip: Check suite conclusion is not success"
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            if [[ -z "${{ github.event.check_suite.pull_requests[0].number }}" ]]; then
+              echo "Skip: No pull requests in check suite"
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
+            BASE_REF="${{ github.event.check_suite.pull_requests[0].base.ref }}"
+            
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # For pull_request events
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            BASE_REF="${{ github.event.pull_request.base.ref }}"
+            
+            # Only process if auto-merge label was added
+            if [[ "${{ github.event.action }}" == "labeled" && "${{ github.event.label.name }}" != "auto-merge" ]]; then
+              echo "Skip: Label '${{ github.event.label.name }}' is not 'auto-merge'"
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # For manual dispatch
+            PR_NUMBER="${{ github.event.inputs.pr_number }}"
+            # Get base ref from API
+            BASE_REF=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.base.ref')
+            
+          else
+            echo "Skip: Unsupported event type"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Validate base branch is master-gmq
+          if [[ "$BASE_REF" != "master-gmq" ]]; then
+            echo "Skip: PR base branch '$BASE_REF' is not 'master-gmq'"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "PR Number: $PR_NUMBER"
+          echo "Base Ref: $BASE_REF"
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "should_run=true" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
       - name: Check if PR has auto-merge label
         id: check_label
+        if: steps.get_pr.outputs.should_run == 'true'
         run: |
-          PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
+          PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
+          echo "Checking auto-merge label for PR #$PR_NUMBER"
+          
           HAS_LABEL=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.labels[] | select(.name == "auto-merge") | .name')
-          echo "has_auto_merge_label=$([[ -n "$HAS_LABEL" ]] && echo "true" || echo "false")" >> $GITHUB_OUTPUT
+          echo "Label result: '$HAS_LABEL'"
+          
+          if [[ -n "$HAS_LABEL" ]]; then
+            echo "✅ PR has auto-merge label"
+            echo "has_auto_merge_label=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ PR does not have auto-merge label"
+            echo "has_auto_merge_label=false" >> $GITHUB_OUTPUT
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
 
       - name: Verify All Required Checks Passed
         id: check_status
+        if: steps.check_label.outputs.has_auto_merge_label == 'true'
         run: |
-          PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
+          PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
+          echo "Checking CI status for PR #$PR_NUMBER"
           
           # Get PR details and check status
           CHECKS_STATUS=$(gh api graphql \
@@ -47,7 +141,14 @@ jobs:
                 }
               }' --jq '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.state')
           
+          echo "CI Status: $CHECKS_STATUS"
           echo "checks_status=$CHECKS_STATUS" >> $GITHUB_OUTPUT
+          
+          if [[ "$CHECKS_STATUS" == "SUCCESS" ]]; then
+            echo "✅ All CI checks passed"
+          else
+            echo "❌ CI checks not successful (status: $CHECKS_STATUS)"
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
 
@@ -56,7 +157,7 @@ jobs:
           steps.check_label.outputs.has_auto_merge_label == 'true' &&
           steps.check_status.outputs.checks_status == 'SUCCESS'
         run: |
-          PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
+          PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
           
           echo "🚀 Adding PR #$PR_NUMBER to merge queue with PAT..."
           
@@ -94,24 +195,54 @@ jobs:
                 }
               }')
 
+          echo "GraphQL Result: $RESULT"
+          
           QUEUE_POSITION=$(echo "$RESULT" | jq -r '.data.enqueuePullRequest.mergeQueueEntry.position // "unknown"')
           echo "✅ Successfully added to merge queue at position: $QUEUE_POSITION"
 
           # Comment on PR with success
           gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-            -f body="🤖 Automatically added to merge queue at position **$QUEUE_POSITION** after CI success ✅"
+            -f body="🤖 Automatically added to merge queue at position **$QUEUE_POSITION** after CI success ✅
 
+Event: ${{ github.event_name }}
+Trigger: Auto-merge label detected with successful CI"
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
+      - name: Handle Conditions Not Met
+        if: |
+          steps.get_pr.outputs.should_run == 'true' && 
+          (steps.check_label.outputs.has_auto_merge_label != 'true' ||
+           steps.check_status.outputs.checks_status != 'SUCCESS')
+        run: |
+          PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
+          HAS_LABEL="${{ steps.check_label.outputs.has_auto_merge_label }}"
+          CHECKS_STATUS="${{ steps.check_status.outputs.checks_status }}"
+          
+          echo "❌ Conditions not met for PR #$PR_NUMBER:"
+          echo "  - Has auto-merge label: $HAS_LABEL"
+          echo "  - CI status: $CHECKS_STATUS"
+          
+          if [[ "$HAS_LABEL" == "true" && "$CHECKS_STATUS" != "SUCCESS" ]]; then
+            gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+              -f body="⏳ PR has auto-merge label but CI checks are not successful yet (status: $CHECKS_STATUS). Will auto-queue when CI passes."
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
 
       - name: Handle Enqueue Failure
         if: failure()
         run: |
-          PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
-          echo "❌ Failed to add PR #$PR_NUMBER to merge queue"
-          
-          # Comment on PR with failure
-          gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-            -f body="❌ Failed to add PR to merge queue automatically. Please check the action logs or add manually using \`/merge-queue\` command."
+          if [[ "${{ steps.get_pr.outputs.should_run }}" == "true" ]]; then
+            PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
+            echo "❌ Failed to add PR #$PR_NUMBER to merge queue"
+            
+            # Comment on PR with failure
+            gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+              -f body="❌ Failed to add PR to merge queue automatically. Please check the [action logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) or add manually using GraphQL.
+
+Error occurred during: ${{ github.event_name }} event"
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
