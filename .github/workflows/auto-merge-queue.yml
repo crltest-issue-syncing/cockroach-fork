@@ -312,10 +312,18 @@ jobs:
           echo "Mergeable: $MERGEABLE"
           echo "Merge State Status: $MERGE_STATE_STATUS"
           
-          # Wait for mergeability check if still unknown
-          if [[ "$MERGEABLE" == "null" ]] || [[ "$MERGEABLE" == "UNKNOWN" ]]; then
-            echo "⏳ Mergeability check still in progress, waiting..."
-            sleep 10
+          # Debug raw response to see what we're getting
+          echo "DEBUG: Raw mergeable field: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')"
+          echo "DEBUG: Raw mergeStateStatus field: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')"
+          
+          # Wait for mergeability check if still unknown  
+          WAIT_COUNT=0
+          MAX_WAITS=3
+          
+          while [[ ("$MERGEABLE" == "null" || "$MERGEABLE" == "UNKNOWN" || "$MERGEABLE" == "MERGEABLE") && $WAIT_COUNT -lt $MAX_WAITS ]]; do
+            WAIT_COUNT=$((WAIT_COUNT + 1))
+            echo "⏳ Mergeability check still in progress, waiting... (attempt $WAIT_COUNT/$MAX_WAITS)"
+            sleep 20
             
             # Re-check mergeability
             MERGEABLE_INFO=$(gh api graphql \
@@ -336,7 +344,13 @@ jobs:
             MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
             MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
             
-            echo "After wait - Mergeable: $MERGEABLE, Status: $MERGE_STATE_STATUS"
+            echo "After wait $WAIT_COUNT - Mergeable: $MERGEABLE, Status: $MERGE_STATE_STATUS"
+            echo "DEBUG: Raw mergeable after wait: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')"
+          done
+          
+          # If still not resolved after max waits, show a warning but continue
+          if [[ "$MERGEABLE" == "null" || "$MERGEABLE" == "UNKNOWN" || "$MERGEABLE" == "MERGEABLE" ]]; then
+            echo "⚠️ Mergeability check did not complete after $MAX_WAITS attempts, proceeding anyway..."
           fi
           
           # Check if PR is ready for merge queue
