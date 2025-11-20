@@ -285,8 +285,9 @@ jobs:
           
           echo "🚀 Adding PR #$PR_NUMBER to merge queue with PAT..."
           
-          # Get PR ID using GraphQL
-          PR_ID=$(gh api graphql \
+          # Check PR mergeability status first
+          echo "Checking PR mergeability..."
+          MERGEABLE_INFO=$(gh api graphql \
             -f owner="${{ github.repository_owner }}" \
             -f repo="${{ github.event.repository.name }}" \
             -F number="$PR_NUMBER" \
@@ -297,13 +298,68 @@ jobs:
                     id
                     title
                     baseRefName
+                    mergeable
+                    mergeableState
+                    mergeStateStatus
                   }
                 }
-              }' --jq '.data.repository.pullRequest.id')
+              }')
+          
+          PR_ID=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.id')
+          MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
+          MERGEABLE_STATE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeableState')
+          MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
+          
+          echo "PR ID: $PR_ID"
+          echo "Mergeable: $MERGEABLE"
+          echo "Mergeable State: $MERGEABLE_STATE" 
+          echo "Merge State Status: $MERGE_STATE_STATUS"
+          
+          # Wait for mergeability check if still unknown
+          if [[ "$MERGEABLE" == "null" ]] || [[ "$MERGEABLE_STATE" == "UNKNOWN" ]]; then
+            echo "⏳ Mergeability check still in progress, waiting..."
+            sleep 10
+            
+            # Re-check mergeability
+            MERGEABLE_INFO=$(gh api graphql \
+              -f owner="${{ github.repository_owner }}" \
+              -f repo="${{ github.event.repository.name }}" \
+              -F number="$PR_NUMBER" \
+              -f query='
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      id
+                      mergeable
+                      mergeableState
+                      mergeStateStatus
+                    }
+                  }
+                }')
+                
+            MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
+            MERGEABLE_STATE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeableState')
+            MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
+            
+            echo "After wait - Mergeable: $MERGEABLE, State: $MERGEABLE_STATE, Status: $MERGE_STATE_STATUS"
+          fi
+          
+          # Check if PR is ready for merge queue
+          if [[ "$MERGEABLE" == "false" ]] || [[ "$MERGEABLE_STATE" == "CONFLICTING" ]]; then
+            echo "❌ PR has merge conflicts and cannot be added to merge queue"
+            gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+              -f body="❌ Cannot add to merge queue: PR has merge conflicts. Please resolve conflicts first."
+            exit 1
+          fi
+          
+          if [[ "$MERGE_STATE_STATUS" != "CLEAN" ]] && [[ "$MERGE_STATE_STATUS" != "UNSTABLE" ]]; then
+            echo "⚠️ PR merge state is $MERGE_STATE_STATUS, proceeding with caution..."
+          fi
 
           echo "📋 PR ID: $PR_ID"
 
-          # Enqueue PR using GraphQL mutation
+          # Enqueue PR using GraphQL mutation with error handling
+          echo "🔄 Attempting to enqueue PR..."
           RESULT=$(gh api graphql \
             -f pr_id="$PR_ID" \
             -f query='
@@ -317,16 +373,41 @@ jobs:
                     position
                   }
                 }
-              }')
+              }' 2>&1) || ENQUEUE_FAILED=true
 
           echo "GraphQL Result: $RESULT"
+          
+          # Check for errors in the response
+          if [[ "$ENQUEUE_FAILED" == "true" ]] || echo "$RESULT" | grep -q "errors"; then
+            echo "❌ Failed to add PR to merge queue"
+            
+            ERROR_MSG=$(echo "$RESULT" | jq -r '.errors[]?.message // "Unknown error"' 2>/dev/null || echo "$RESULT")
+            echo "Error details: $ERROR_MSG"
+            
+            # Post helpful error comment
+            if echo "$ERROR_MSG" | grep -q -i "mergeability"; then
+              gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                -f body="❌ Cannot add to merge queue: Mergeability check has not completed. This usually resolves automatically - please try again in a few minutes or remove and re-add the auto-merge label."
+            elif echo "$ERROR_MSG" | grep -q -i "force-push\|branch protection"; then
+              gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                -f body="❌ Cannot add to merge queue: Branch protection rules prevent merge queue operations. Please check that merge queue is enabled for the **master-gmq** branch and has appropriate permissions."
+            else
+              gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                -f body="❌ Failed to add to merge queue: $ERROR_MSG. Please check repository settings and try again."
+            fi
+            
+            exit 1
+          fi
           
           QUEUE_POSITION=$(echo "$RESULT" | jq -r '.data.enqueuePullRequest.mergeQueueEntry.position // "unknown"')
           echo "✅ Successfully added to merge queue at position: $QUEUE_POSITION"
 
           # Comment on PR with success
           gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-            -f body="🤖 Automatically added to merge queue at position **$QUEUE_POSITION** after CI success ✅ (Event: ${{ github.event_name }}, Trigger: Auto-merge label detected with successful CI)"
+            -f body="🤖 Successfully added to merge queue at position **$QUEUE_POSITION** after CI success ✅
+
+Event: ${{ github.event_name }}
+Trigger: Auto-merge label detected with successful CI"
 
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
