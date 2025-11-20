@@ -285,9 +285,9 @@ jobs:
           
           echo "🚀 Adding PR #$PR_NUMBER to merge queue with PAT..."
           
-          # Check PR mergeability status first
-          echo "Checking PR mergeability..."
-          MERGEABLE_INFO=$(gh api graphql \
+          # Get PR ID for enqueue operation
+          echo "Getting PR ID..."
+          PR_INFO=$(gh api graphql \
             -f owner="${{ github.repository_owner }}" \
             -f repo="${{ github.event.repository.name }}" \
             -F number="$PR_NUMBER" \
@@ -297,123 +297,84 @@ jobs:
                   pullRequest(number: $number) {
                     id
                     title
-                    baseRefName
-                    mergeable
-                    mergeStateStatus
                   }
                 }
               }')
           
-          PR_ID=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.id')
-          MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
-          MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
-          
-          echo "PR ID: $PR_ID"
-          echo "Mergeable: $MERGEABLE"
-          echo "Merge State Status: $MERGE_STATE_STATUS"
-          
-          # Debug raw response to see what we're getting
-          echo "DEBUG: Raw mergeable field: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')"
-          echo "DEBUG: Raw mergeStateStatus field: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')"
-          
-          # Wait for mergeability check if still unknown  
-          WAIT_COUNT=0
-          MAX_WAITS=50
-          
-          while [[ ("$MERGEABLE" == "null" || "$MERGEABLE" == "UNKNOWN" || "$MERGEABLE" == "MERGEABLE") && $WAIT_COUNT -lt $MAX_WAITS ]]; do
-            WAIT_COUNT=$((WAIT_COUNT + 1))
-            echo "⏳ Mergeability check still in progress, waiting... (attempt $WAIT_COUNT/$MAX_WAITS)"
-            sleep 30
-            
-            # Re-check mergeability
-            MERGEABLE_INFO=$(gh api graphql \
-              -f owner="${{ github.repository_owner }}" \
-              -f repo="${{ github.event.repository.name }}" \
-              -F number="$PR_NUMBER" \
-              -f query='
-                query($owner: String!, $repo: String!, $number: Int!) {
-                  repository(owner: $owner, name: $repo) {
-                    pullRequest(number: $number) {
-                      id
-                      mergeable
-                      mergeStateStatus
-                    }
-                  }
-                }')
-                
-            MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
-            MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
-            
-            echo "After wait $WAIT_COUNT - Mergeable: $MERGEABLE, Status: $MERGE_STATE_STATUS"
-            echo "DEBUG: Raw mergeable after wait: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')"
-          done
-          
-          # If still not resolved after max waits, show a warning but continue
-          if [[ "$MERGEABLE" == "null" || "$MERGEABLE" == "UNKNOWN" || "$MERGEABLE" == "MERGEABLE" ]]; then
-            echo "⚠️ Mergeability check did not complete after $MAX_WAITS attempts, proceeding anyway..."
-          fi
-          
-          # Check if PR is ready for merge queue
-          if [[ "$MERGEABLE" == "false" ]]; then
-            echo "❌ PR has merge conflicts and cannot be added to merge queue"
-            gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-              -f body="❌ Cannot add to merge queue: PR has merge conflicts. Please resolve conflicts first."
-            exit 1
-          fi
-          
-          if [[ "$MERGE_STATE_STATUS" != "CLEAN" ]] && [[ "$MERGE_STATE_STATUS" != "UNSTABLE" ]]; then
-            echo "⚠️ PR merge state is $MERGE_STATE_STATUS, proceeding with caution..."
-          fi
-
+          PR_ID=$(echo "$PR_INFO" | jq -r '.data.repository.pullRequest.id')
           echo "📋 PR ID: $PR_ID"
 
-          # Enqueue PR using GraphQL mutation with error handling
-          echo "🔄 Attempting to enqueue PR..."
-          RESULT=$(gh api graphql \
-            -f pr_id="$PR_ID" \
-            -f query='
-              mutation($pr_id: ID!) {
-                enqueuePullRequest(input: {
-                  pullRequestId: $pr_id
-                }) {
-                  clientMutationId
-                  mergeQueueEntry {
-                    id
-                    position
-                  }
-                }
-              }' 2>&1) || ENQUEUE_FAILED=true
-
-          echo "GraphQL Result: $RESULT"
+          # Retry adding to merge queue up to 50 times with 30-second intervals
+          RETRY_COUNT=0
+          MAX_RETRIES=50
+          SUCCESS=false
           
-          # Check for errors in the response
-          if [[ "$ENQUEUE_FAILED" == "true" ]] || echo "$RESULT" | grep -q "errors"; then
-            echo "❌ Failed to add PR to merge queue"
+          while [[ $RETRY_COUNT -lt $MAX_RETRIES && "$SUCCESS" == "false" ]]; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "🔄 Attempting to enqueue PR (attempt $RETRY_COUNT/$MAX_RETRIES)..."
             
-            ERROR_MSG=$(echo "$RESULT" | jq -r '.errors[]?.message // "Unknown error"' 2>/dev/null || echo "$RESULT")
-            echo "Error details: $ERROR_MSG"
+            # Attempt to enqueue PR
+            RESULT=$(gh api graphql \
+              -f pr_id="$PR_ID" \
+              -f query='
+                mutation($pr_id: ID!) {
+                  enqueuePullRequest(input: {
+                    pullRequestId: $pr_id
+                  }) {
+                    clientMutationId
+                    mergeQueueEntry {
+                      id
+                      position
+                    }
+                  }
+                }' 2>&1) || ENQUEUE_FAILED=true
+
+            echo "GraphQL Result: $RESULT"
             
-            # Post helpful error comment
+            # Check if successful
+            if [[ "$ENQUEUE_FAILED" != "true" ]] && ! echo "$RESULT" | grep -q "errors"; then
+              QUEUE_POSITION=$(echo "$RESULT" | jq -r '.data.enqueuePullRequest.mergeQueueEntry.position // "unknown"')
+              echo "✅ Successfully added to merge queue at position: $QUEUE_POSITION after $RETRY_COUNT attempts"
+              
+              # Comment on PR with success
+              gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                -f body="🤖 Successfully added to merge queue at position **$QUEUE_POSITION** after CI success ✅ (Attempts: $RETRY_COUNT, Event: ${{ github.event_name }})"
+              
+              SUCCESS=true
+            else
+              # Extract error message
+              ERROR_MSG=$(echo "$RESULT" | jq -r '.errors[]?.message // "Unknown error"' 2>/dev/null || echo "$RESULT")
+              echo "❌ Attempt $RETRY_COUNT failed: $ERROR_MSG"
+              
+              # Reset for next attempt
+              ENQUEUE_FAILED=""
+              
+              # Wait before retry (unless it's the last attempt)
+              if [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; then
+                echo "⏳ Waiting 30 seconds before retry..."
+                sleep 30
+              fi
+            fi
+          done
+          
+          # If all retries failed
+          if [[ "$SUCCESS" == "false" ]]; then
+            echo "❌ Failed to add PR to merge queue after $MAX_RETRIES attempts"
+            
+            # Post final error comment with the last error message
             if echo "$ERROR_MSG" | grep -q -i "mergeability"; then
               gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-                -f body="❌ Cannot add to merge queue: Mergeability check has not completed. This usually resolves automatically - please try again in a few minutes or remove and re-add the auto-merge label."
+                -f body="❌ Cannot add to merge queue after $MAX_RETRIES attempts: Mergeability check has not completed. This may indicate a persistent issue - please check repository settings or try manually."
             elif echo "$ERROR_MSG" | grep -q -i "force-push\|branch protection"; then
               gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-                -f body="❌ Cannot add to merge queue: Branch protection rules prevent merge queue operations. Please check that merge queue is enabled for the **master-gmq** branch and has appropriate permissions."
+                -f body="❌ Cannot add to merge queue after $MAX_RETRIES attempts: Branch protection rules prevent merge queue operations. Please check that merge queue is enabled for the **master-gmq** branch and has appropriate permissions."
             else
               gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-                -f body="❌ Failed to add to merge queue: $ERROR_MSG. Please check repository settings and try again."
+                -f body="❌ Failed to add to merge queue after $MAX_RETRIES attempts: $ERROR_MSG. Please check repository settings and try again manually."
             fi
             
             exit 1
           fi
-          
-          QUEUE_POSITION=$(echo "$RESULT" | jq -r '.data.enqueuePullRequest.mergeQueueEntry.position // "unknown"')
-          echo "✅ Successfully added to merge queue at position: $QUEUE_POSITION"
-
-          # Comment on PR with success
-          gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-            -f body="🤖 Successfully added to merge queue at position **$QUEUE_POSITION** after CI success ✅ (Event: ${{ github.event_name }}, Trigger: Auto-merge label detected with successful CI)"
 
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
