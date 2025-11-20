@@ -260,18 +260,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
 
-      - name: Verify Final CI Status
-        id: check_status
-        if: |
-          steps.check_label.outputs.has_auto_merge_label == 'true' &&
-          steps.wait_for_ci.outputs.checks_status == 'SUCCESS'
+      - name: Debug Before Enqueue
+        if: steps.check_label.outputs.has_auto_merge_label == 'true'
         run: |
-          PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
-          CHECKS_STATUS="${{ steps.wait_for_ci.outputs.checks_status }}"
-          echo "Final CI Status: $CHECKS_STATUS"
-          echo "checks_status=$CHECKS_STATUS" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+          echo "DEBUG: Auto-merge label check: ${{ steps.check_label.outputs.has_auto_merge_label }}"
+          echo "DEBUG: Wait for CI output: ${{ steps.wait_for_ci.outputs.checks_status }}"
+          echo "DEBUG: Should proceed to enqueue: $([ '${{ steps.wait_for_ci.outputs.checks_status }}' == 'SUCCESS' ] && echo 'YES' || echo 'NO')"
 
       - name: Add to Merge Queue
         if: |
