@@ -158,12 +158,12 @@ jobs:
                   }
                 }')
             
-            # Debug: Show all check runs
-            echo "DEBUG: All check runs found:"
-            echo "$response" | jq -r '.data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes[].checkRuns.nodes[] | "\(.name): \(.conclusion // .status)"'
+            # Debug: Show all check runs (to stderr to not interfere with return value)
+            echo "DEBUG: All check runs found:" >&2
+            echo "$response" | jq -r '.data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes[].checkRuns.nodes[] | "\(.name): \(.conclusion // .status)"' >&2
             
             # Check status of specific required jobs only
-            echo "DEBUG: Checking required CI jobs:"
+            echo "DEBUG: Checking required CI jobs:" >&2
             local all_success=true
             local any_failure=false
             local pending_jobs=()
@@ -174,7 +174,7 @@ jobs:
                 | select(.name == $job)
                 | .conclusion // .status')
               
-              echo "  $job: $job_status"
+              echo "  $job: $job_status" >&2
               
               if [[ "$job_status" == "success" ]] || [[ "$job_status" == "SUCCESS" ]]; then
                 continue
@@ -187,18 +187,18 @@ jobs:
               fi
             done
             
-            # Debug the final state
-            echo "DEBUG: Final state - all_success=$all_success, any_failure=$any_failure, pending_jobs=(${pending_jobs[*]})"
+            # Debug the final state (to stderr)
+            echo "DEBUG: Final state - all_success=$all_success, any_failure=$any_failure, pending_jobs=(${pending_jobs[*]})" >&2
             
-            # Determine overall status
+            # Return ONLY the status (to stdout)
             if [[ "$any_failure" == true ]]; then
-              echo "DEBUG: Overall status: FAILURE (some jobs failed)"
+              echo "DEBUG: Overall status: FAILURE (some jobs failed)" >&2
               echo "FAILURE"
             elif [[ "$all_success" == true ]]; then
-              echo "DEBUG: Overall status: SUCCESS (all required jobs passed)"
+              echo "DEBUG: Overall status: SUCCESS (all required jobs passed)" >&2
               echo "SUCCESS" 
             else
-              echo "DEBUG: Overall status: PENDING (waiting for: ${pending_jobs[*]})"
+              echo "DEBUG: Overall status: PENDING (waiting for: ${pending_jobs[*]})" >&2
               echo "PENDING"
             fi
           }
