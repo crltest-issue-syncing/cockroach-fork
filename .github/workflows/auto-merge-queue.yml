@@ -1,487 +1,457 @@
-# name: Auto Merge Queue on CI Success
-# on:
-#   check_suite:
-#     types: [completed]
-#   pull_request:
-#     types: [labeled]
-#     branches: [master-gmq]
-#   workflow_dispatch:
-#     inputs:
-#       pr_number:
-#         description: 'PR number to test workflow'
-#         required: true
-#         type: string
-
-# jobs:
-#   auto_enqueue:
-#     runs-on: ubuntu-latest
-#     steps:
-#       - name: Debug Event Information
-#         run: |
-#           echo "Event name: ${{ github.event_name }}"
-#           echo "Event action: ${{ github.event.action || 'N/A' }}"
-          
-#           if [[ "${{ github.event_name }}" == "check_suite" ]]; then
-#             echo "Check suite conclusion: ${{ github.event.check_suite.conclusion }}"
-#             echo "Check suite status: ${{ github.event.check_suite.status }}"
-#             echo "Check suite head branch: ${{ github.event.check_suite.head_branch }}"
-#             echo "Pull requests count: ${{ github.event.check_suite.pull_requests[0] && '1+' || '0' }}"
-#           elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-#             echo "PR number: ${{ github.event.pull_request.number }}"
-#             echo "PR base ref: ${{ github.event.pull_request.base.ref }}"
-#             echo "PR state: ${{ github.event.pull_request.state }}"
-#           elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-#             echo "Manual trigger for PR: ${{ github.event.inputs.pr_number }}"
-#           fi
-
-#       - name: Determine PR Number and Validate
-#         id: get_pr
-#         run: |
-#           if [[ "${{ github.event_name }}" == "check_suite" ]]; then
-#             # For check_suite events
-#             if [[ "${{ github.event.check_suite.conclusion }}" != "success" ]]; then
-#               echo "Skip: Check suite conclusion is not success"
-#               echo "should_run=false" >> $GITHUB_OUTPUT
-#               exit 0
-#             fi
-            
-#             if [[ -z "${{ github.event.check_suite.pull_requests[0].number }}" ]]; then
-#               echo "Skip: No pull requests in check suite"
-#               echo "should_run=false" >> $GITHUB_OUTPUT
-#               exit 0
-#             fi
-            
-#             PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
-#             BASE_REF="${{ github.event.check_suite.pull_requests[0].base.ref }}"
-            
-#           elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-#             # For pull_request events
-#             PR_NUMBER="${{ github.event.pull_request.number }}"
-#             BASE_REF="${{ github.event.pull_request.base.ref }}"
-            
-#             # Only process if auto-merge label was added
-#             if [[ "${{ github.event.action }}" == "labeled" && "${{ github.event.label.name }}" != "auto-merge" ]]; then
-#               echo "Skip: Label '${{ github.event.label.name }}' is not 'auto-merge'"
-#               echo "should_run=false" >> $GITHUB_OUTPUT
-#               exit 0
-#             fi
-            
-#           elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-#             # For manual dispatch
-#             PR_NUMBER="${{ github.event.inputs.pr_number }}"
-#             # Get base ref from API
-#             BASE_REF=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.base.ref')
-            
-#           else
-#             echo "Skip: Unsupported event type"
-#             echo "should_run=false" >> $GITHUB_OUTPUT
-#             exit 0
-#           fi
-          
-#           # Validate base branch is master-gmq
-#           if [[ "$BASE_REF" != "master-gmq" ]]; then
-#             echo "Skip: PR base branch '$BASE_REF' is not 'master-gmq'"
-#             echo "should_run=false" >> $GITHUB_OUTPUT
-#             exit 0
-#           fi
-          
-#           echo "PR Number: $PR_NUMBER"
-#           echo "Base Ref: $BASE_REF"
-#           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-#           echo "should_run=true" >> $GITHUB_OUTPUT
-#         env:
-#           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
-
-#       - name: Check if PR has auto-merge label
-#         id: check_label
-#         if: steps.get_pr.outputs.should_run == 'true'
-#         run: |
-#           PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
-#           echo "Checking auto-merge label for PR #$PR_NUMBER"
-          
-#           HAS_LABEL=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.labels[] | select(.name == "auto-merge") | .name')
-#           echo "Label result: '$HAS_LABEL'"
-          
-#           if [[ -n "$HAS_LABEL" ]]; then
-#             echo "✅ PR has auto-merge label"
-#             echo "has_auto_merge_label=true" >> $GITHUB_OUTPUT
-#           else
-#             echo "❌ PR does not have auto-merge label"
-#             echo "has_auto_merge_label=false" >> $GITHUB_OUTPUT
-#           fi
-#         env:
-#           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
-
-#       - name: Wait for CI Completion (with 10min timeout)
-#         id: wait_for_ci
-#         if: steps.check_label.outputs.has_auto_merge_label == 'true'
-#         run: |
-#           PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
-#           echo "⏳ Waiting for CI completion on PR #$PR_NUMBER (timeout: 10 minutes)"
-          
-#           # Function to check specific Essential CI jobs by name
-#           check_ci_status() {
-#             # List of required CI jobs that must pass
-#             local required_jobs=("acceptance" "check_generated_code" "docker_image_amd64" "examples_orms" "lint" "local_roachtest" "local_roachtest_fips" "linux_amd64_build" "linux_amd64_fips_build" "unit_tests")
-            
-#             local response=$(gh api graphql \
-#               -f owner="${{ github.repository_owner }}" \
-#               -f repo="${{ github.event.repository.name }}" \
-#               -F number="$PR_NUMBER" \
-#               -f query='
-#                 query($owner: String!, $repo: String!, $number: Int!) {
-#                   repository(owner: $owner, name: $repo) {
-#                     pullRequest(number: $number) {
-#                       commits(last: 1) {
-#                         nodes {
-#                           commit {
-#                             checkSuites(first: 20) {
-#                               nodes {
-#                                 workflowRun {
-#                                   workflow {
-#                                     name
-#                                   }
-#                                 }
-#                                 checkRuns(first: 50) {
-#                                   nodes {
-#                                     name
-#                                     conclusion
-#                                     status
-#                                   }
-#                                 }
-#                               }
-#                             }
-#                           }
-#                         }
-#                       }
-#                     }
-#                   }
-#                 }')
-            
-#             # Debug: Show all check runs (to stderr to not interfere with return value)
-#             echo "DEBUG: All check runs found:" >&2
-#             echo "$response" | jq -r '.data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes[].checkRuns.nodes[] | "\(.name): \(.conclusion // .status)"' >&2
-            
-#             # Check status of specific required jobs only
-#             echo "DEBUG: Checking required CI jobs:" >&2
-#             local all_success=true
-#             local any_failure=false
-#             local pending_jobs=()
-            
-#             for job in "${required_jobs[@]}"; do
-#               local job_status=$(echo "$response" | jq -r --arg job "$job" '
-#                 .data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes[].checkRuns.nodes[]
-#                 | select(.name == $job)
-#                 | .conclusion // .status')
-              
-#               echo "  $job: $job_status" >&2
-              
-#               if [[ "$job_status" == "success" ]] || [[ "$job_status" == "SUCCESS" ]]; then
-#                 continue
-#               elif [[ "$job_status" == "failure" ]] || [[ "$job_status" == "FAILURE" ]] || [[ "$job_status" == "cancelled" ]] || [[ "$job_status" == "CANCELLED" ]] || [[ "$job_status" == "timed_out" ]] || [[ "$job_status" == "TIMED_OUT" ]]; then
-#                 any_failure=true
-#                 break
-#               else
-#                 all_success=false
-#                 pending_jobs+=("$job")
-#               fi
-#             done
-            
-#             # Debug the final state (to stderr)
-#             echo "DEBUG: Final state - all_success=$all_success, any_failure=$any_failure, pending_jobs=(${pending_jobs[*]})" >&2
-            
-#             # Return ONLY the status (to stdout)
-#             if [[ "$any_failure" == true ]]; then
-#               echo "DEBUG: Overall status: FAILURE (some jobs failed)" >&2
-#               echo "FAILURE"
-#             elif [[ "$all_success" == true ]]; then
-#               echo "DEBUG: Overall status: SUCCESS (all required jobs passed)" >&2
-#               echo "SUCCESS" 
-#             else
-#               echo "DEBUG: Overall status: PENDING (waiting for: ${pending_jobs[*]})" >&2
-#               echo "PENDING"
-#             fi
-#           }
-          
-#           # Initial status check
-#           CHECKS_STATUS=$(check_ci_status)
-#           echo "Initial CI Status: $CHECKS_STATUS"
-          
-#           if [[ "$CHECKS_STATUS" == "SUCCESS" ]]; then
-#             echo "✅ CI checks already passed"
-#             echo "checks_status=SUCCESS" >> $GITHUB_OUTPUT
-#             exit 0
-#           fi
-          
-#           # Post initial waiting message
-#           gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-#             -f body="⏳ Auto-merge label detected! Waiting for CI checks to complete (timeout: 10 minutes)..."
-          
-#           # Wait up to 10 minutes (600 seconds) with 30-second intervals
-#           TIMEOUT=600
-#           INTERVAL=30
-#           ELAPSED=0
-          
-#           while [[ $ELAPSED -lt $TIMEOUT ]]; do
-#             sleep $INTERVAL
-#             ELAPSED=$((ELAPSED + INTERVAL))
-            
-#             CHECKS_STATUS=$(check_ci_status)
-#             echo "[$ELAPSED/${TIMEOUT}s] CI Status: '$CHECKS_STATUS'"
-#             echo "DEBUG: Status length: ${#CHECKS_STATUS}"
-#             echo "DEBUG: Status in hex: $(echo -n "$CHECKS_STATUS" | xxd)"
-            
-#             # Trim whitespace
-#             CHECKS_STATUS=$(echo "$CHECKS_STATUS" | xargs)
-#             echo "DEBUG: Trimmed status: '$CHECKS_STATUS'"
-            
-#             case "$CHECKS_STATUS" in
-#               "SUCCESS")
-#                 echo "✅ All CI checks passed after ${ELAPSED}s"
-#                 echo "checks_status=SUCCESS" >> $GITHUB_OUTPUT
-#                 exit 0
-#                 ;;
-#               "FAILURE"|"ERROR")
-#                 echo "❌ CI checks failed (status: $CHECKS_STATUS)"
-#                 echo "checks_status=$CHECKS_STATUS" >> $GITHUB_OUTPUT
-#                 gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-#                   -f body="❌ CI checks failed (status: $CHECKS_STATUS). Cannot add to merge queue."
-#                 exit 0
-#                 ;;
-#               "PENDING"|"EXPECTED"|null)
-#                 # Continue waiting
-#                 if [[ $((ELAPSED % 120)) -eq 0 ]]; then  # Update every 2 minutes
-#                   gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-#                     -f body="⏳ Still waiting for CI checks... (${ELAPSED}s elapsed, status: $CHECKS_STATUS)"
-#                 fi
-#                 ;;
-#               *)
-#                 echo "⚠️ Unknown CI status: $CHECKS_STATUS, continuing to wait..."
-#                 ;;
-#             esac
-#           done
-          
-#           # Timeout reached
-#           echo "⏰ Timeout reached after 10 minutes"
-#           echo "checks_status=TIMEOUT" >> $GITHUB_OUTPUT
-#           gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-#             -f body="⏰ Timeout: CI checks did not complete within 10 minutes. Please check CI status and re-add auto-merge label if needed."
-#         env:
-#           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
-
-#       - name: Debug Before Enqueue
-#         if: steps.check_label.outputs.has_auto_merge_label == 'true'
-#         run: |
-#           echo "DEBUG: Auto-merge label check: ${{ steps.check_label.outputs.has_auto_merge_label }}"
-#           echo "DEBUG: Wait for CI output: ${{ steps.wait_for_ci.outputs.checks_status }}"
-#           echo "DEBUG: Should proceed to enqueue: $([ '${{ steps.wait_for_ci.outputs.checks_status }}' == 'SUCCESS' ] && echo 'YES' || echo 'NO')"
-
-#       - name: Add to Merge Queue
-#         if: |
-#           steps.check_label.outputs.has_auto_merge_label == 'true' &&
-#           steps.wait_for_ci.outputs.checks_status == 'SUCCESS'
-#         run: |
-#           PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
-          
-#           echo "🚀 Adding PR #$PR_NUMBER to merge queue with PAT..."
-          
-#           # Check PR mergeability status first
-#           echo "Checking PR mergeability..."
-#           MERGEABLE_INFO=$(gh api graphql \
-#             -f owner="${{ github.repository_owner }}" \
-#             -f repo="${{ github.event.repository.name }}" \
-#             -F number="$PR_NUMBER" \
-#             -f query='
-#               query($owner: String!, $repo: String!, $number: Int!) {
-#                 repository(owner: $owner, name: $repo) {
-#                   pullRequest(number: $number) {
-#                     id
-#                     title
-#                     baseRefName
-#                     mergeable
-#                     mergeStateStatus
-#                   }
-#                 }
-#               }')
-          
-#           PR_ID=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.id')
-#           MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
-#           MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
-          
-#           echo "PR ID: $PR_ID"
-#           echo "Mergeable: $MERGEABLE"
-#           echo "Merge State Status: $MERGE_STATE_STATUS"
-          
-#           # Debug raw response to see what we're getting
-#           echo "DEBUG: Raw mergeable field: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')"
-#           echo "DEBUG: Raw mergeStateStatus field: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')"
-          
-#           # Wait for mergeability check if still unknown  
-#           WAIT_COUNT=0
-#           MAX_WAITS=3
-          
-#           while [[ ("$MERGEABLE" == "null" || "$MERGEABLE" == "UNKNOWN" || "$MERGEABLE" == "MERGEABLE") && $WAIT_COUNT -lt $MAX_WAITS ]]; do
-#             WAIT_COUNT=$((WAIT_COUNT + 1))
-#             echo "⏳ Mergeability check still in progress, waiting... (attempt $WAIT_COUNT/$MAX_WAITS)"
-#             sleep 20
-            
-#             # Re-check mergeability
-#             MERGEABLE_INFO=$(gh api graphql \
-#               -f owner="${{ github.repository_owner }}" \
-#               -f repo="${{ github.event.repository.name }}" \
-#               -F number="$PR_NUMBER" \
-#               -f query='
-#                 query($owner: String!, $repo: String!, $number: Int!) {
-#                   repository(owner: $owner, name: $repo) {
-#                     pullRequest(number: $number) {
-#                       id
-#                       mergeable
-#                       mergeStateStatus
-#                     }
-#                   }
-#                 }')
-                
-#             MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
-#             MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
-            
-#             echo "After wait $WAIT_COUNT - Mergeable: $MERGEABLE, Status: $MERGE_STATE_STATUS"
-#             echo "DEBUG: Raw mergeable after wait: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')"
-#           done
-          
-#           # If still not resolved after max waits, show a warning but continue
-#           if [[ "$MERGEABLE" == "null" || "$MERGEABLE" == "UNKNOWN" || "$MERGEABLE" == "MERGEABLE" ]]; then
-#             echo "⚠️ Mergeability check did not complete after $MAX_WAITS attempts, proceeding anyway..."
-#           fi
-          
-#           # Check if PR is ready for merge queue
-#           if [[ "$MERGEABLE" == "false" ]]; then
-#             echo "❌ PR has merge conflicts and cannot be added to merge queue"
-#             gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-#               -f body="❌ Cannot add to merge queue: PR has merge conflicts. Please resolve conflicts first."
-#             exit 1
-#           fi
-          
-#           if [[ "$MERGE_STATE_STATUS" != "CLEAN" ]] && [[ "$MERGE_STATE_STATUS" != "UNSTABLE" ]]; then
-#             echo "⚠️ PR merge state is $MERGE_STATE_STATUS, proceeding with caution..."
-#           fi
-
-#           echo "📋 PR ID: $PR_ID"
-
-#           # Enqueue PR using GraphQL mutation with error handling
-#           echo "🔄 Attempting to enqueue PR..."
-#           RESULT=$(gh api graphql \
-#             -f pr_id="$PR_ID" \
-#             -f query='
-#               mutation($pr_id: ID!) {
-#                 enqueuePullRequest(input: {
-#                   pullRequestId: $pr_id
-#                 }) {
-#                   clientMutationId
-#                   mergeQueueEntry {
-#                     id
-#                     position
-#                   }
-#                 }
-#               }' 2>&1) || ENQUEUE_FAILED=true
-
-#           echo "GraphQL Result: $RESULT"
-          
-#           # Check for errors in the response
-#           if [[ "$ENQUEUE_FAILED" == "true" ]] || echo "$RESULT" | grep -q "errors"; then
-#             echo "❌ Failed to add PR to merge queue"
-            
-#             ERROR_MSG=$(echo "$RESULT" | jq -r '.errors[]?.message // "Unknown error"' 2>/dev/null || echo "$RESULT")
-#             echo "Error details: $ERROR_MSG"
-            
-#             # Post helpful error comment
-#             if echo "$ERROR_MSG" | grep -q -i "mergeability"; then
-#               gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-#                 -f body="❌ Cannot add to merge queue: Mergeability check has not completed. This usually resolves automatically - please try again in a few minutes or remove and re-add the auto-merge label."
-#             elif echo "$ERROR_MSG" | grep -q -i "force-push\|branch protection"; then
-#               gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-#                 -f body="❌ Cannot add to merge queue: Branch protection rules prevent merge queue operations. Please check that merge queue is enabled for the **master-gmq** branch and has appropriate permissions."
-#             else
-#               gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-#                 -f body="❌ Failed to add to merge queue: $ERROR_MSG. Please check repository settings and try again."
-#             fi
-            
-#             exit 1
-#           fi
-          
-#           QUEUE_POSITION=$(echo "$RESULT" | jq -r '.data.enqueuePullRequest.mergeQueueEntry.position // "unknown"')
-#           echo "✅ Successfully added to merge queue at position: $QUEUE_POSITION"
-
-#           # Comment on PR with success
-#           gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-#             -f body="🤖 Successfully added to merge queue at position **$QUEUE_POSITION** after CI success ✅ (Event: ${{ github.event_name }}, Trigger: Auto-merge label detected with successful CI)"
-
-#         env:
-#           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
-
-#       - name: Handle Conditions Not Met
-#         if: |
-#           steps.get_pr.outputs.should_run == 'true' && 
-#           (steps.check_label.outputs.has_auto_merge_label != 'true' ||
-#            (steps.wait_for_ci.outputs.checks_status != 'SUCCESS' && steps.wait_for_ci.outputs.checks_status != ''))
-#         run: |
-#           PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
-#           HAS_LABEL="${{ steps.check_label.outputs.has_auto_merge_label }}"
-#           CHECKS_STATUS="${{ steps.wait_for_ci.outputs.checks_status }}"
-          
-#           echo "❌ Conditions not met for PR #$PR_NUMBER:"
-#           echo "  - Has auto-merge label: $HAS_LABEL"
-#           echo "  - CI status after waiting: $CHECKS_STATUS"
-          
-#           if [[ "$HAS_LABEL" == "true" && "$CHECKS_STATUS" == "TIMEOUT" ]]; then
-#             echo "CI checks timed out after 10 minutes"
-#           elif [[ "$HAS_LABEL" == "true" && "$CHECKS_STATUS" == "FAILURE" ]]; then
-#             echo "CI checks failed"
-#           elif [[ "$HAS_LABEL" != "true" ]]; then
-#             echo "Auto-merge label not found"
-#           fi
-#         env:
-#           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
-
-#       - name: Handle Enqueue Failure
-#         if: failure()
-#         run: |
-#           if [[ "${{ steps.get_pr.outputs.should_run }}" == "true" ]]; then
-#             PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
-#             echo "❌ Failed to add PR #$PR_NUMBER to merge queue"
-            
-#             # Comment on PR with failure
-#             gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-#               -f body="❌ Failed to add PR to merge queue automatically. Please check the [action logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) or add manually using GraphQL. Error occurred during: ${{ github.event_name }} event"
-#           fi
-#         env:
-#           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
-
 name: Auto Merge Queue on CI Success
 on:
-  pull_request:
-    types: [labeled, ready_for_review, review_requested, synchronize]
   check_suite:
     types: [completed]
+  pull_request:
+    types: [labeled]
+    branches: [master-gmq]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to test workflow'
+        required: true
+        type: string
 
 jobs:
-  auto-merge-queue:
+  auto_enqueue:
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-      contents: write
     steps:
-      - name: Check PR mergeability and add to merge queue
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pr = context.payload.pull_request;
-            if (pr.state === "open" && pr.mergeable_state === "clean") {
-              console.log(`Adding PR #${pr.number} to merge queue...`);
-              await github.rest.pulls.addToMergeQueue({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: pr.number,
-              });
-            } else {
-              console.log(`PR #${pr.number} not ready for merge queue`);
-            }
+      - name: Debug Event Information
+        run: |
+          echo "Event name: ${{ github.event_name }}"
+          echo "Event action: ${{ github.event.action || 'N/A' }}"
+          
+          if [[ "${{ github.event_name }}" == "check_suite" ]]; then
+            echo "Check suite conclusion: ${{ github.event.check_suite.conclusion }}"
+            echo "Check suite status: ${{ github.event.check_suite.status }}"
+            echo "Check suite head branch: ${{ github.event.check_suite.head_branch }}"
+            echo "Pull requests count: ${{ github.event.check_suite.pull_requests[0] && '1+' || '0' }}"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "PR number: ${{ github.event.pull_request.number }}"
+            echo "PR base ref: ${{ github.event.pull_request.base.ref }}"
+            echo "PR state: ${{ github.event.pull_request.state }}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "Manual trigger for PR: ${{ github.event.inputs.pr_number }}"
+          fi
+
+      - name: Determine PR Number and Validate
+        id: get_pr
+        run: |
+          if [[ "${{ github.event_name }}" == "check_suite" ]]; then
+            # For check_suite events
+            if [[ "${{ github.event.check_suite.conclusion }}" != "success" ]]; then
+              echo "Skip: Check suite conclusion is not success"
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            if [[ -z "${{ github.event.check_suite.pull_requests[0].number }}" ]]; then
+              echo "Skip: No pull requests in check suite"
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
+            BASE_REF="${{ github.event.check_suite.pull_requests[0].base.ref }}"
+            
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # For pull_request events
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            BASE_REF="${{ github.event.pull_request.base.ref }}"
+            
+            # Only process if auto-merge label was added
+            if [[ "${{ github.event.action }}" == "labeled" && "${{ github.event.label.name }}" != "auto-merge" ]]; then
+              echo "Skip: Label '${{ github.event.label.name }}' is not 'auto-merge'"
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # For manual dispatch
+            PR_NUMBER="${{ github.event.inputs.pr_number }}"
+            # Get base ref from API
+            BASE_REF=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.base.ref')
+            
+          else
+            echo "Skip: Unsupported event type"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Validate base branch is master-gmq
+          if [[ "$BASE_REF" != "master-gmq" ]]; then
+            echo "Skip: PR base branch '$BASE_REF' is not 'master-gmq'"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "PR Number: $PR_NUMBER"
+          echo "Base Ref: $BASE_REF"
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "should_run=true" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
+      - name: Check if PR has auto-merge label
+        id: check_label
+        if: steps.get_pr.outputs.should_run == 'true'
+        run: |
+          PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
+          echo "Checking auto-merge label for PR #$PR_NUMBER"
+          
+          HAS_LABEL=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.labels[] | select(.name == "auto-merge") | .name')
+          echo "Label result: '$HAS_LABEL'"
+          
+          if [[ -n "$HAS_LABEL" ]]; then
+            echo "✅ PR has auto-merge label"
+            echo "has_auto_merge_label=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ PR does not have auto-merge label"
+            echo "has_auto_merge_label=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
+      - name: Wait for CI Completion (with 10min timeout)
+        id: wait_for_ci
+        if: steps.check_label.outputs.has_auto_merge_label == 'true'
+        run: |
+          PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
+          echo "⏳ Waiting for CI completion on PR #$PR_NUMBER (timeout: 10 minutes)"
+          
+          # Function to check specific Essential CI jobs by name
+          check_ci_status() {
+            # List of required CI jobs that must pass
+            local required_jobs=("acceptance" "check_generated_code" "docker_image_amd64" "examples_orms" "lint" "local_roachtest" "local_roachtest_fips" "linux_amd64_build" "linux_amd64_fips_build" "unit_tests")
+            
+            local response=$(gh api graphql \
+              -f owner="${{ github.repository_owner }}" \
+              -f repo="${{ github.event.repository.name }}" \
+              -F number="$PR_NUMBER" \
+              -f query='
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      commits(last: 1) {
+                        nodes {
+                          commit {
+                            checkSuites(first: 20) {
+                              nodes {
+                                workflowRun {
+                                  workflow {
+                                    name
+                                  }
+                                }
+                                checkRuns(first: 50) {
+                                  nodes {
+                                    name
+                                    conclusion
+                                    status
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }')
+            
+            # Debug: Show all check runs (to stderr to not interfere with return value)
+            echo "DEBUG: All check runs found:" >&2
+            echo "$response" | jq -r '.data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes[].checkRuns.nodes[] | "\(.name): \(.conclusion // .status)"' >&2
+            
+            # Check status of specific required jobs only
+            echo "DEBUG: Checking required CI jobs:" >&2
+            local all_success=true
+            local any_failure=false
+            local pending_jobs=()
+            
+            for job in "${required_jobs[@]}"; do
+              local job_status=$(echo "$response" | jq -r --arg job "$job" '
+                .data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes[].checkRuns.nodes[]
+                | select(.name == $job)
+                | .conclusion // .status')
+              
+              echo "  $job: $job_status" >&2
+              
+              if [[ "$job_status" == "success" ]] || [[ "$job_status" == "SUCCESS" ]]; then
+                continue
+              elif [[ "$job_status" == "failure" ]] || [[ "$job_status" == "FAILURE" ]] || [[ "$job_status" == "cancelled" ]] || [[ "$job_status" == "CANCELLED" ]] || [[ "$job_status" == "timed_out" ]] || [[ "$job_status" == "TIMED_OUT" ]]; then
+                any_failure=true
+                break
+              else
+                all_success=false
+                pending_jobs+=("$job")
+              fi
+            done
+            
+            # Debug the final state (to stderr)
+            echo "DEBUG: Final state - all_success=$all_success, any_failure=$any_failure, pending_jobs=(${pending_jobs[*]})" >&2
+            
+            # Return ONLY the status (to stdout)
+            if [[ "$any_failure" == true ]]; then
+              echo "DEBUG: Overall status: FAILURE (some jobs failed)" >&2
+              echo "FAILURE"
+            elif [[ "$all_success" == true ]]; then
+              echo "DEBUG: Overall status: SUCCESS (all required jobs passed)" >&2
+              echo "SUCCESS" 
+            else
+              echo "DEBUG: Overall status: PENDING (waiting for: ${pending_jobs[*]})" >&2
+              echo "PENDING"
+            fi
+          }
+          
+          # Initial status check
+          CHECKS_STATUS=$(check_ci_status)
+          echo "Initial CI Status: $CHECKS_STATUS"
+          
+          if [[ "$CHECKS_STATUS" == "SUCCESS" ]]; then
+            echo "✅ CI checks already passed"
+            echo "checks_status=SUCCESS" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Post initial waiting message
+          gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+            -f body="⏳ Auto-merge label detected! Waiting for CI checks to complete (timeout: 10 minutes)..."
+          
+          # Wait up to 10 minutes (600 seconds) with 30-second intervals
+          TIMEOUT=600
+          INTERVAL=30
+          ELAPSED=0
+          
+          while [[ $ELAPSED -lt $TIMEOUT ]]; do
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+            
+            CHECKS_STATUS=$(check_ci_status)
+            echo "[$ELAPSED/${TIMEOUT}s] CI Status: '$CHECKS_STATUS'"
+            echo "DEBUG: Status length: ${#CHECKS_STATUS}"
+            echo "DEBUG: Status in hex: $(echo -n "$CHECKS_STATUS" | xxd)"
+            
+            # Trim whitespace
+            CHECKS_STATUS=$(echo "$CHECKS_STATUS" | xargs)
+            echo "DEBUG: Trimmed status: '$CHECKS_STATUS'"
+            
+            case "$CHECKS_STATUS" in
+              "SUCCESS")
+                echo "✅ All CI checks passed after ${ELAPSED}s"
+                echo "checks_status=SUCCESS" >> $GITHUB_OUTPUT
+                exit 0
+                ;;
+              "FAILURE"|"ERROR")
+                echo "❌ CI checks failed (status: $CHECKS_STATUS)"
+                echo "checks_status=$CHECKS_STATUS" >> $GITHUB_OUTPUT
+                gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                  -f body="❌ CI checks failed (status: $CHECKS_STATUS). Cannot add to merge queue."
+                exit 0
+                ;;
+              "PENDING"|"EXPECTED"|null)
+                # Continue waiting
+                if [[ $((ELAPSED % 120)) -eq 0 ]]; then  # Update every 2 minutes
+                  gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                    -f body="⏳ Still waiting for CI checks... (${ELAPSED}s elapsed, status: $CHECKS_STATUS)"
+                fi
+                ;;
+              *)
+                echo "⚠️ Unknown CI status: $CHECKS_STATUS, continuing to wait..."
+                ;;
+            esac
+          done
+          
+          # Timeout reached
+          echo "⏰ Timeout reached after 10 minutes"
+          echo "checks_status=TIMEOUT" >> $GITHUB_OUTPUT
+          gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+            -f body="⏰ Timeout: CI checks did not complete within 10 minutes. Please check CI status and re-add auto-merge label if needed."
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
+      - name: Debug Before Enqueue
+        if: steps.check_label.outputs.has_auto_merge_label == 'true'
+        run: |
+          echo "DEBUG: Auto-merge label check: ${{ steps.check_label.outputs.has_auto_merge_label }}"
+          echo "DEBUG: Wait for CI output: ${{ steps.wait_for_ci.outputs.checks_status }}"
+          echo "DEBUG: Should proceed to enqueue: $([ '${{ steps.wait_for_ci.outputs.checks_status }}' == 'SUCCESS' ] && echo 'YES' || echo 'NO')"
+
+      - name: Add to Merge Queue
+        if: |
+          steps.check_label.outputs.has_auto_merge_label == 'true' &&
+          steps.wait_for_ci.outputs.checks_status == 'SUCCESS'
+        run: |
+          PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
+          
+          echo "🚀 Adding PR #$PR_NUMBER to merge queue with PAT..."
+          
+          # Check PR mergeability status first
+          echo "Checking PR mergeability..."
+          MERGEABLE_INFO=$(gh api graphql \
+            -f owner="${{ github.repository_owner }}" \
+            -f repo="${{ github.event.repository.name }}" \
+            -F number="$PR_NUMBER" \
+            -f query='
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    id
+                    title
+                    baseRefName
+                    mergeable
+                    mergeStateStatus
+                  }
+                }
+              }')
+          
+          PR_ID=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.id')
+          MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
+          MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
+          
+          echo "PR ID: $PR_ID"
+          echo "Mergeable: $MERGEABLE"
+          echo "Merge State Status: $MERGE_STATE_STATUS"
+          
+          # Debug raw response to see what we're getting
+          echo "DEBUG: Raw mergeable field: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')"
+          echo "DEBUG: Raw mergeStateStatus field: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')"
+          
+          # Wait for mergeability check if still unknown  
+          WAIT_COUNT=0
+          MAX_WAITS=50
+          
+          while [[ ("$MERGEABLE" == "null" || "$MERGEABLE" == "UNKNOWN" || "$MERGEABLE" == "MERGEABLE") && $WAIT_COUNT -lt $MAX_WAITS ]]; do
+            WAIT_COUNT=$((WAIT_COUNT + 1))
+            echo "⏳ Mergeability check still in progress, waiting... (attempt $WAIT_COUNT/$MAX_WAITS)"
+            sleep 30
+            
+            # Re-check mergeability
+            MERGEABLE_INFO=$(gh api graphql \
+              -f owner="${{ github.repository_owner }}" \
+              -f repo="${{ github.event.repository.name }}" \
+              -F number="$PR_NUMBER" \
+              -f query='
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      id
+                      mergeable
+                      mergeStateStatus
+                    }
+                  }
+                }')
+                
+            MERGEABLE=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')
+            MERGE_STATE_STATUS=$(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeStateStatus')
+            
+            echo "After wait $WAIT_COUNT - Mergeable: $MERGEABLE, Status: $MERGE_STATE_STATUS"
+            echo "DEBUG: Raw mergeable after wait: $(echo "$MERGEABLE_INFO" | jq -r '.data.repository.pullRequest.mergeable')"
+          done
+          
+          # If still not resolved after max waits, show a warning but continue
+          if [[ "$MERGEABLE" == "null" || "$MERGEABLE" == "UNKNOWN" || "$MERGEABLE" == "MERGEABLE" ]]; then
+            echo "⚠️ Mergeability check did not complete after $MAX_WAITS attempts, proceeding anyway..."
+          fi
+          
+          # Check if PR is ready for merge queue
+          if [[ "$MERGEABLE" == "false" ]]; then
+            echo "❌ PR has merge conflicts and cannot be added to merge queue"
+            gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+              -f body="❌ Cannot add to merge queue: PR has merge conflicts. Please resolve conflicts first."
+            exit 1
+          fi
+          
+          if [[ "$MERGE_STATE_STATUS" != "CLEAN" ]] && [[ "$MERGE_STATE_STATUS" != "UNSTABLE" ]]; then
+            echo "⚠️ PR merge state is $MERGE_STATE_STATUS, proceeding with caution..."
+          fi
+
+          echo "📋 PR ID: $PR_ID"
+
+          # Enqueue PR using GraphQL mutation with error handling
+          echo "🔄 Attempting to enqueue PR..."
+          RESULT=$(gh api graphql \
+            -f pr_id="$PR_ID" \
+            -f query='
+              mutation($pr_id: ID!) {
+                enqueuePullRequest(input: {
+                  pullRequestId: $pr_id
+                }) {
+                  clientMutationId
+                  mergeQueueEntry {
+                    id
+                    position
+                  }
+                }
+              }' 2>&1) || ENQUEUE_FAILED=true
+
+          echo "GraphQL Result: $RESULT"
+          
+          # Check for errors in the response
+          if [[ "$ENQUEUE_FAILED" == "true" ]] || echo "$RESULT" | grep -q "errors"; then
+            echo "❌ Failed to add PR to merge queue"
+            
+            ERROR_MSG=$(echo "$RESULT" | jq -r '.errors[]?.message // "Unknown error"' 2>/dev/null || echo "$RESULT")
+            echo "Error details: $ERROR_MSG"
+            
+            # Post helpful error comment
+            if echo "$ERROR_MSG" | grep -q -i "mergeability"; then
+              gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                -f body="❌ Cannot add to merge queue: Mergeability check has not completed. This usually resolves automatically - please try again in a few minutes or remove and re-add the auto-merge label."
+            elif echo "$ERROR_MSG" | grep -q -i "force-push\|branch protection"; then
+              gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                -f body="❌ Cannot add to merge queue: Branch protection rules prevent merge queue operations. Please check that merge queue is enabled for the **master-gmq** branch and has appropriate permissions."
+            else
+              gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                -f body="❌ Failed to add to merge queue: $ERROR_MSG. Please check repository settings and try again."
+            fi
+            
+            exit 1
+          fi
+          
+          QUEUE_POSITION=$(echo "$RESULT" | jq -r '.data.enqueuePullRequest.mergeQueueEntry.position // "unknown"')
+          echo "✅ Successfully added to merge queue at position: $QUEUE_POSITION"
+
+          # Comment on PR with success
+          gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+            -f body="🤖 Successfully added to merge queue at position **$QUEUE_POSITION** after CI success ✅ (Event: ${{ github.event_name }}, Trigger: Auto-merge label detected with successful CI)"
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
+      - name: Handle Conditions Not Met
+        if: |
+          steps.get_pr.outputs.should_run == 'true' && 
+          (steps.check_label.outputs.has_auto_merge_label != 'true' ||
+           (steps.wait_for_ci.outputs.checks_status != 'SUCCESS' && steps.wait_for_ci.outputs.checks_status != ''))
+        run: |
+          PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
+          HAS_LABEL="${{ steps.check_label.outputs.has_auto_merge_label }}"
+          CHECKS_STATUS="${{ steps.wait_for_ci.outputs.checks_status }}"
+          
+          echo "❌ Conditions not met for PR #$PR_NUMBER:"
+          echo "  - Has auto-merge label: $HAS_LABEL"
+          echo "  - CI status after waiting: $CHECKS_STATUS"
+          
+          if [[ "$HAS_LABEL" == "true" && "$CHECKS_STATUS" == "TIMEOUT" ]]; then
+            echo "CI checks timed out after 10 minutes"
+          elif [[ "$HAS_LABEL" == "true" && "$CHECKS_STATUS" == "FAILURE" ]]; then
+            echo "CI checks failed"
+          elif [[ "$HAS_LABEL" != "true" ]]; then
+            echo "Auto-merge label not found"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
+      - name: Handle Enqueue Failure
+        if: failure()
+        run: |
+          if [[ "${{ steps.get_pr.outputs.should_run }}" == "true" ]]; then
+            PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
+            echo "❌ Failed to add PR #$PR_NUMBER to merge queue"
+            
+            # Comment on PR with failure
+            gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+              -f body="❌ Failed to add PR to merge queue automatically. Please check the [action logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) or add manually using GraphQL. Error occurred during: ${{ github.event_name }} event"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
