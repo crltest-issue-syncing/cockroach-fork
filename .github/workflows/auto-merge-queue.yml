@@ -112,50 +112,114 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
 
-      - name: Verify All Required Checks Passed
-        id: check_status
+      - name: Wait for CI Completion (with 10min timeout)
+        id: wait_for_ci
         if: steps.check_label.outputs.has_auto_merge_label == 'true'
         run: |
           PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
-          echo "Checking CI status for PR #$PR_NUMBER"
+          echo "⏳ Waiting for CI completion on PR #$PR_NUMBER (timeout: 10 minutes)"
           
-          # Get PR details and check status
-          CHECKS_STATUS=$(gh api graphql \
-            -f owner="${{ github.repository_owner }}" \
-            -f repo="${{ github.event.repository.name }}" \
-            -F number="$PR_NUMBER" \
-            -f query='
-              query($owner: String!, $repo: String!, $number: Int!) {
-                repository(owner: $owner, name: $repo) {
-                  pullRequest(number: $number) {
-                    commits(last: 1) {
-                      nodes {
-                        commit {
-                          statusCheckRollup {
-                            state
+          # Function to check CI status
+          check_ci_status() {
+            gh api graphql \
+              -f owner="${{ github.repository_owner }}" \
+              -f repo="${{ github.event.repository.name }}" \
+              -F number="$PR_NUMBER" \
+              -f query='
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      commits(last: 1) {
+                        nodes {
+                          commit {
+                            statusCheckRollup {
+                              state
+                            }
                           }
                         }
                       }
                     }
                   }
-                }
-              }' --jq '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.state')
+                }' --jq '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.state'
+          }
           
-          echo "CI Status: $CHECKS_STATUS"
-          echo "checks_status=$CHECKS_STATUS" >> $GITHUB_OUTPUT
+          # Initial status check
+          CHECKS_STATUS=$(check_ci_status)
+          echo "Initial CI Status: $CHECKS_STATUS"
           
           if [[ "$CHECKS_STATUS" == "SUCCESS" ]]; then
-            echo "✅ All CI checks passed"
-          else
-            echo "❌ CI checks not successful (status: $CHECKS_STATUS)"
+            echo "✅ CI checks already passed"
+            echo "checks_status=SUCCESS" >> $GITHUB_OUTPUT
+            exit 0
           fi
+          
+          # Post initial waiting message
+          gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+            -f body="⏳ Auto-merge label detected! Waiting for CI checks to complete (timeout: 10 minutes)..."
+          
+          # Wait up to 10 minutes (600 seconds) with 30-second intervals
+          TIMEOUT=600
+          INTERVAL=30
+          ELAPSED=0
+          
+          while [[ $ELAPSED -lt $TIMEOUT ]]; do
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+            
+            CHECKS_STATUS=$(check_ci_status)
+            echo "[$ELAPSED/${TIMEOUT}s] CI Status: $CHECKS_STATUS"
+            
+            case "$CHECKS_STATUS" in
+              "SUCCESS")
+                echo "✅ All CI checks passed after ${ELAPSED}s"
+                echo "checks_status=SUCCESS" >> $GITHUB_OUTPUT
+                exit 0
+                ;;
+              "FAILURE"|"ERROR")
+                echo "❌ CI checks failed (status: $CHECKS_STATUS)"
+                echo "checks_status=$CHECKS_STATUS" >> $GITHUB_OUTPUT
+                gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                  -f body="❌ CI checks failed (status: $CHECKS_STATUS). Cannot add to merge queue."
+                exit 0
+                ;;
+              "PENDING"|"EXPECTED"|null)
+                # Continue waiting
+                if [[ $((ELAPSED % 120)) -eq 0 ]]; then  # Update every 2 minutes
+                  gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+                    -f body="⏳ Still waiting for CI checks... (${ELAPSED}s elapsed, status: $CHECKS_STATUS)"
+                fi
+                ;;
+              *)
+                echo "⚠️ Unknown CI status: $CHECKS_STATUS, continuing to wait..."
+                ;;
+            esac
+          done
+          
+          # Timeout reached
+          echo "⏰ Timeout reached after 10 minutes"
+          echo "checks_status=TIMEOUT" >> $GITHUB_OUTPUT
+          gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+            -f body="⏰ Timeout: CI checks did not complete within 10 minutes. Please check CI status and re-add auto-merge label if needed."
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+
+      - name: Verify Final CI Status
+        id: check_status
+        if: |
+          steps.check_label.outputs.has_auto_merge_label == 'true' &&
+          steps.wait_for_ci.outputs.checks_status == 'SUCCESS'
+        run: |
+          PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
+          CHECKS_STATUS="${{ steps.wait_for_ci.outputs.checks_status }}"
+          echo "Final CI Status: $CHECKS_STATUS"
+          echo "checks_status=$CHECKS_STATUS" >> $GITHUB_OUTPUT
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
 
       - name: Add to Merge Queue
         if: |
           steps.check_label.outputs.has_auto_merge_label == 'true' &&
-          steps.check_status.outputs.checks_status == 'SUCCESS'
+          steps.wait_for_ci.outputs.checks_status == 'SUCCESS'
         run: |
           PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
           
@@ -202,10 +266,7 @@ jobs:
 
           # Comment on PR with success
           gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-            -f body="🤖 Automatically added to merge queue at position **$QUEUE_POSITION** after CI success ✅
-
-Event: ${{ github.event_name }}
-Trigger: Auto-merge label detected with successful CI"
+            -f body="🤖 Automatically added to merge queue at position **$QUEUE_POSITION** after CI success ✅ (Event: ${{ github.event_name }}, Trigger: Auto-merge label detected with successful CI)"
 
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
@@ -214,19 +275,22 @@ Trigger: Auto-merge label detected with successful CI"
         if: |
           steps.get_pr.outputs.should_run == 'true' && 
           (steps.check_label.outputs.has_auto_merge_label != 'true' ||
-           steps.check_status.outputs.checks_status != 'SUCCESS')
+           (steps.wait_for_ci.outputs.checks_status != 'SUCCESS' && steps.wait_for_ci.outputs.checks_status != ''))
         run: |
           PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
           HAS_LABEL="${{ steps.check_label.outputs.has_auto_merge_label }}"
-          CHECKS_STATUS="${{ steps.check_status.outputs.checks_status }}"
+          CHECKS_STATUS="${{ steps.wait_for_ci.outputs.checks_status }}"
           
           echo "❌ Conditions not met for PR #$PR_NUMBER:"
           echo "  - Has auto-merge label: $HAS_LABEL"
-          echo "  - CI status: $CHECKS_STATUS"
+          echo "  - CI status after waiting: $CHECKS_STATUS"
           
-          if [[ "$HAS_LABEL" == "true" && "$CHECKS_STATUS" != "SUCCESS" ]]; then
-            gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-              -f body="⏳ PR has auto-merge label but CI checks are not successful yet (status: $CHECKS_STATUS). Will auto-queue when CI passes."
+          if [[ "$HAS_LABEL" == "true" && "$CHECKS_STATUS" == "TIMEOUT" ]]; then
+            echo "CI checks timed out after 10 minutes"
+          elif [[ "$HAS_LABEL" == "true" && "$CHECKS_STATUS" == "FAILURE" ]]; then
+            echo "CI checks failed"
+          elif [[ "$HAS_LABEL" != "true" ]]; then
+            echo "Auto-merge label not found"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
@@ -240,9 +304,7 @@ Trigger: Auto-merge label detected with successful CI"
             
             # Comment on PR with failure
             gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-              -f body="❌ Failed to add PR to merge queue automatically. Please check the [action logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) or add manually using GraphQL.
-
-Error occurred during: ${{ github.event_name }} event"
+              -f body="❌ Failed to add PR to merge queue automatically. Please check the [action logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) or add manually using GraphQL. Error occurred during: ${{ github.event_name }} event"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
