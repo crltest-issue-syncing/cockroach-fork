@@ -119,8 +119,11 @@ jobs:
           PR_NUMBER="${{ steps.get_pr.outputs.pr_number }}"
           echo "⏳ Waiting for CI completion on PR #$PR_NUMBER (timeout: 10 minutes)"
           
-          # Function to check CI status (excluding auto-merge workflow)
+          # Function to check specific Essential CI jobs by name
           check_ci_status() {
+            # List of required CI jobs that must pass
+            local required_jobs=("acceptance" "check_generated_code" "docker_image_amd64" "examples_orms" "lint" "local_roachtest" "local_roachtest_fips" "linux_amd64_build" "linux_amd64_fips_build" "unit_tests")
+            
             local response=$(gh api graphql \
               -f owner="${{ github.repository_owner }}" \
               -f repo="${{ github.event.repository.name }}" \
@@ -139,8 +142,6 @@ jobs:
                                     name
                                   }
                                 }
-                                conclusion
-                                status
                                 checkRuns(first: 50) {
                                   nodes {
                                     name
@@ -157,23 +158,46 @@ jobs:
                   }
                 }')
             
-            # Debug: Show all workflows
-            echo "DEBUG: All workflows found:"
-            echo "$response" | jq -r '.data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes[] | select(.workflowRun.workflow.name != null) | .workflowRun.workflow.name'
+            # Debug: Show all check runs
+            echo "DEBUG: All check runs found:"
+            echo "$response" | jq -r '.data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes[].checkRuns.nodes[] | "\(.name): \(.conclusion // .status)"'
             
-            # Filter out auto-merge workflow and calculate status
-            local status=$(echo "$response" | jq -r '
-              .data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes
-              | map(select(.workflowRun.workflow.name != "Auto Merge Queue on CI Success"))
-              | map(.checkRuns.nodes[])
-              | map(select(.conclusion != null))
-              | if length == 0 then "PENDING"
-                elif all(.conclusion == "success") then "SUCCESS"
-                elif any(.conclusion == "failure") then "FAILURE"
-                else "PENDING" end')
-                
-            echo "DEBUG: Filtered status (excluding auto-merge): $status"
-            echo "$status"
+            # Check status of specific required jobs only
+            echo "DEBUG: Checking required CI jobs:"
+            local all_success=true
+            local any_failure=false
+            local pending_jobs=()
+            
+            for job in "${required_jobs[@]}"; do
+              local job_status=$(echo "$response" | jq -r --arg job "$job" '
+                .data.repository.pullRequest.commits.nodes[0].commit.checkSuites.nodes[].checkRuns.nodes[]
+                | select(.name == $job)
+                | .conclusion // .status')
+              
+              echo "  $job: $job_status"
+              
+              if [[ "$job_status" == "success" ]]; then
+                continue
+              elif [[ "$job_status" == "failure" ]] || [[ "$job_status" == "cancelled" ]] || [[ "$job_status" == "timed_out" ]]; then
+                any_failure=true
+                break
+              else
+                all_success=false
+                pending_jobs+=("$job")
+              fi
+            done
+            
+            # Determine overall status
+            if [[ "$any_failure" == true ]]; then
+              echo "DEBUG: Overall status: FAILURE (some jobs failed)"
+              echo "FAILURE"
+            elif [[ "$all_success" == true ]]; then
+              echo "DEBUG: Overall status: SUCCESS (all required jobs passed)"
+              echo "SUCCESS" 
+            else
+              echo "DEBUG: Overall status: PENDING (waiting for: ${pending_jobs[*]})"
+              echo "PENDING"
+            fi
           }
           
           # Initial status check
