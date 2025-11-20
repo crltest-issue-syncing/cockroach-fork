@@ -187,6 +187,9 @@ jobs:
               fi
             done
             
+            # Debug the final state
+            echo "DEBUG: Final state - all_success=$all_success, any_failure=$any_failure, pending_jobs=(${pending_jobs[*]})"
+            
             # Determine overall status
             if [[ "$any_failure" == true ]]; then
               echo "DEBUG: Overall status: FAILURE (some jobs failed)"
