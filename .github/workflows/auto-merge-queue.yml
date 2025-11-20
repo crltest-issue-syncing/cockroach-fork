@@ -404,10 +404,7 @@ jobs:
 
           # Comment on PR with success
           gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-            -f body="🤖 Successfully added to merge queue at position **$QUEUE_POSITION** after CI success ✅
-
-Event: ${{ github.event_name }}
-Trigger: Auto-merge label detected with successful CI"
+            -f body="🤖 Successfully added to merge queue at position **$QUEUE_POSITION** after CI success ✅ (Event: ${{ github.event_name }}, Trigger: Auto-merge label detected with successful CI)"
 
         env:
           GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
