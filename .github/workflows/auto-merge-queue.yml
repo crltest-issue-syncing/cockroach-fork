@@ -224,7 +224,13 @@ jobs:
             ELAPSED=$((ELAPSED + INTERVAL))
             
             CHECKS_STATUS=$(check_ci_status)
-            echo "[$ELAPSED/${TIMEOUT}s] CI Status: $CHECKS_STATUS"
+            echo "[$ELAPSED/${TIMEOUT}s] CI Status: '$CHECKS_STATUS'"
+            echo "DEBUG: Status length: ${#CHECKS_STATUS}"
+            echo "DEBUG: Status in hex: $(echo -n "$CHECKS_STATUS" | xxd)"
+            
+            # Trim whitespace
+            CHECKS_STATUS=$(echo "$CHECKS_STATUS" | xargs)
+            echo "DEBUG: Trimmed status: '$CHECKS_STATUS'"
             
             case "$CHECKS_STATUS" in
               "SUCCESS")
