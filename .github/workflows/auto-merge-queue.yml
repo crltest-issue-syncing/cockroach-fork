@@ -331,16 +331,28 @@ jobs:
 
             echo "GraphQL Result: $RESULT"
             
+            # Debug the success conditions
+            echo "DEBUG: ENQUEUE_FAILED='$ENQUEUE_FAILED'"
+            echo "DEBUG: Checking for errors in result..."
+            if echo "$RESULT" | grep -q "errors"; then
+              echo "DEBUG: Found errors in result"
+            else
+              echo "DEBUG: No errors found in result"
+            fi
+            
             # Check if successful
             if [[ "$ENQUEUE_FAILED" != "true" ]] && ! echo "$RESULT" | grep -q "errors"; then
               QUEUE_POSITION=$(echo "$RESULT" | jq -r '.data.enqueuePullRequest.mergeQueueEntry.position // "unknown"')
               echo "✅ Successfully added to merge queue at position: $QUEUE_POSITION after $RETRY_COUNT attempts"
+              echo "DEBUG: Setting SUCCESS=true and should exit loop"
               
               # Comment on PR with success
               gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
                 -f body="🤖 Successfully added to merge queue at position **$QUEUE_POSITION** after CI success ✅ (Attempts: $RETRY_COUNT, Event: ${{ github.event_name }})"
               
               SUCCESS=true
+              echo "DEBUG: SUCCESS variable is now: $SUCCESS"
+              break  # Explicitly break out of the loop
             else
               # Extract error message
               ERROR_MSG=$(echo "$RESULT" | jq -r '.errors[]?.message // "Unknown error"' 2>/dev/null || echo "$RESULT")
