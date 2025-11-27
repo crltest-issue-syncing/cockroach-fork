@@ -1,0 +1,25 @@
+queue_rules:
+  - name: default
+    checks_timeout: 1 min
+    queue_conditions:
+      # Equivalent of bors.pr_status
+      - check-success = license/cla-success
+      - check-success = blathers/release-justification-check-success
+      - check-success = check_base_branch
+      # Require at least one approval
+      - "#approved-reviews-by >= 0"
+      # Block PRs with certain labels
+      - label != do-not-merge"
+      - label != backport
+    merge_conditions:
+      # Equivalent of bors.status (must pass on the speculative branch)
+      - check-success = acceptance
+      - check-success = check_generated_code
+      - check-success = docker_image_amd64
+      - check-success = examples_orms
+      - check-success = lint
+      - check-success = linux_amd64_build
+      - check-success = linux_amd64_fips_build
+      - check-success = local_roachtest
+      - check-success = local_roachteste_fips
+      - check-success = unit_tests
